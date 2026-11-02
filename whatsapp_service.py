@@ -5,6 +5,7 @@ AI summarization, urgency scoring, AI reply drafting, and clipboard copying
 for personal WhatsApp Desktop user workflows without unofficial APIs or automation.
 """
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 CONTACTS_FILE = APP_DIR / "whatsapp_contacts.json"
 HISTORY_FILE = APP_DIR / "whatsapp_history.json"
+
+
+def _get_current_notification_listener(listener_type: Any) -> Any:
+    """Get the WinRT singleton across bindings that expose a property or method."""
+    listener = getattr(listener_type, "current", None)
+    if listener is not None:
+        return listener
+
+    get_current = getattr(listener_type, "get_current", None)
+    if callable(get_current):
+        return get_current()
+    return None
 
 
 @dataclass
@@ -454,6 +467,9 @@ class WhatsAppNotificationListener(QObject):
         self.ai_provider = ai_provider
         self.is_monitoring = False
         self._processed_hashes: set[str] = set()
+        self._winrt_listener = None
+        self._poll_task = None
+        self._seen_notification_ids: set[int] = set()
 
     def check_notification_support(self) -> Tuple[bool, str]:
         """
@@ -484,9 +500,10 @@ class WhatsAppNotificationListener(QObject):
                     except ImportError:
                         return False, "Manual Import / Clipboard Mode (winrt/winsdk package not installed)"
 
-            listener = UserNotificationListener.get_current()
+            listener = _get_current_notification_listener(UserNotificationListener)
             if not listener:
                 return False, "Manual Import / Clipboard Mode (Windows Notification Listener unavailable)"
+            self._winrt_listener = listener
 
             # Check permission status
             status = listener.get_access_status()
@@ -506,14 +523,142 @@ class WhatsAppNotificationListener(QObject):
         Starts live notification monitoring if supported, or falls back gracefully to manual mode.
         """
         supported, status_msg = self.check_notification_support()
+        if supported and (self._poll_task is None or self._poll_task.done()):
+            try:
+                loop = asyncio.get_running_loop()
+            except Exception as exc:
+                logger.warning(
+                    "Windows notification listener could not start (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                supported = False
+                status_msg = (
+                    "Manual Import / Clipboard Mode "
+                    f"({type(exc).__name__})"
+                )
+            else:
+                self.is_monitoring = True
+                self._seen_notification_ids.clear()
+                self._poll_task = loop.create_task(
+                    self._run_notification_polling()
+                )
+
         self.is_monitoring = supported
         self.status_changed.emit(status_msg, self.is_monitoring)
         logger.info(f"WhatsApp notification listener state: monitoring={self.is_monitoring}, msg='{status_msg}'")
         return supported, status_msg
 
+    async def _read_current_notifications(self) -> Any:
+        """Read the current toast list from the WinRT asynchronous API."""
+        from winrt.windows.ui.notifications import NotificationKinds
+
+        return await self._winrt_listener.get_notifications_async(
+            NotificationKinds.TOAST
+        )
+
+    async def _run_notification_polling(self) -> None:
+        """Poll notifications without blocking Qt's single-threaded apartment."""
+        first_poll = True
+        while self.is_monitoring:
+            try:
+                await self._poll_notifications(seed=first_poll)
+                first_poll = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Windows notifications could not be polled (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                self.is_monitoring = False
+                self.status_changed.emit(
+                    f"Manual Import / Clipboard Mode ({type(exc).__name__})",
+                    False,
+                )
+                return
+            await asyncio.sleep(1.0)
+
+    async def _poll_notifications(self, *, seed: bool = False) -> None:
+        """Import only notifications that arrived after monitoring started."""
+        if not self.is_monitoring:
+            return
+
+        notifications = await self._read_current_notifications()
+        current_ids = set()
+        new_notifications = []
+        for notification in notifications:
+            notification_id = getattr(notification, "id", None)
+            if notification_id is None:
+                continue
+            notification_id = int(notification_id)
+            current_ids.add(notification_id)
+            if not seed and notification_id not in self._seen_notification_ids:
+                new_notifications.append(notification)
+        self._seen_notification_ids = current_ids
+        for notification in new_notifications:
+            self._process_user_notification(notification)
+
+    def _process_user_notification(self, notification: Any) -> None:
+        """Extract a toast's app and readable text fields."""
+        try:
+            from winrt.windows.ui.notifications import (
+                KnownNotificationBindings,
+            )
+
+            app_info = notification.app_info
+            app_id = str(getattr(app_info, "app_user_model_id", "") or "")
+            display_info = getattr(app_info, "display_info", None)
+            app_name = str(
+                getattr(display_info, "display_name", "") or ""
+            )
+
+            visual = notification.notification.visual
+            binding = visual.get_binding(
+                KnownNotificationBindings.toast_generic
+            )
+            if binding is None:
+                return
+
+            text_elements = binding.get_text_elements()
+            texts = [
+                str(getattr(element, "text", "") or "").strip()
+                for element in text_elements
+            ]
+            texts = [text for text in texts if text]
+            if not texts:
+                return
+
+            sender_name = texts[0] if len(texts) > 1 else app_name
+            body = " ".join(texts[1:]) if len(texts) > 1 else texts[0]
+            creation_time = getattr(notification, "creation_time", None)
+            timestamp = (
+                creation_time.isoformat()
+                if callable(getattr(creation_time, "isoformat", None))
+                else str(creation_time or "")
+            )
+            self.process_raw_notification(
+                app_id=app_id,
+                app_name=app_name,
+                sender=sender_name,
+                body=body,
+                timestamp=timestamp,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Windows notification could not be processed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+
     def stop_monitoring(self) -> None:
         """Stops live notification monitoring."""
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
         self.is_monitoring = False
+        self._seen_notification_ids.clear()
         status_msg = "Manual Import / Clipboard Mode (Monitoring Stopped)"
         self.status_changed.emit(status_msg, False)
         logger.info("WhatsApp notification listener stopped.")

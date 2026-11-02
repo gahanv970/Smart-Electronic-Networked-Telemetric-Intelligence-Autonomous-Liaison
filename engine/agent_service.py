@@ -101,6 +101,7 @@ class AgentService(QObject):
         task_service: Any,
         memory_service: Any,
         automation_service: Any,
+        browser_service: Any,
         parent: Optional[QObject] = None,
         config: Optional[AgentConfig] = None,
         model_factory: Optional[Callable[[Any, str], Any]] = None,
@@ -117,6 +118,7 @@ class AgentService(QObject):
         self._task_service = task_service
         self._memory_service = memory_service
         self._automation_service = automation_service
+        self._browser_service = browser_service
         self._config = config
         self._model_factory = model_factory or GeminiToolChatModel
 
@@ -154,6 +156,7 @@ class AgentService(QObject):
                 task_service=task_service,
                 memory_service=memory_service,
                 automation_service=automation_service,
+                browser_service=browser_service,
             )
             self._broker = ConfirmationBroker(
                 self._registry,

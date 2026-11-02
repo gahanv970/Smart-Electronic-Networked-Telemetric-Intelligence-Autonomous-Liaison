@@ -227,9 +227,15 @@ def test_every_registered_app_tool_serializes_for_gemini():
         def get_system_status(self):
             return None
 
+        def navigate_url(self, url, user_confirmed=False):
+            return None
+
     stub = Stub()
     registry = build_app_registry(
-        task_service=stub, memory_service=stub, automation_service=stub
+        task_service=stub,
+        memory_service=stub,
+        automation_service=stub,
+        browser_service=stub,
     )
     model, client = make_model(response=response_with([text_part("ok")]))
     model.generate(

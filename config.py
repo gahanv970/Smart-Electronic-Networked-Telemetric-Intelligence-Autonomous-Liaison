@@ -33,7 +33,7 @@ class SecretStorageError(RuntimeError):
     """Raised when a credential cannot be stored in secure OS storage."""
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "gemini_model": "gemini-2.0-flash",
+    "gemini_model": "gemini-3.8-flash",
     "memory_enabled": True,
     "automation_require_confirmation": True,
     "gmail_user_email": "",

@@ -15,9 +15,9 @@ from config import get_secret, set_secret
 logger = logging.getLogger(__name__)
 
 # Modern verified Gemini models
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 SUPPORTED_MODELS = [
-    "gemini-2.0-flash",
+    DEFAULT_MODEL,
     "gemini-2.5-flash",
     "gemini-2.5-pro",
     "gemini-1.5-flash",
