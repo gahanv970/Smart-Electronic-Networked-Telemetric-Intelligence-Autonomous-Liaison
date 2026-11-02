@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -218,7 +219,13 @@ def test_permissions_match_the_review(services):
     registry, _, _, _, _ = services
     assert registry.get("create_task").spec.permission is Permission.CONFIRMATION_REQUIRED
     assert registry.get("open_url").spec.permission is Permission.CONFIRMATION_REQUIRED
-    for name in ("get_task", "list_tasks", "search_memories", "get_system_status"):
+    for name in (
+        "get_task",
+        "list_tasks",
+        "search_memories",
+        "search_news",
+        "get_system_status",
+    ):
         assert registry.get(name).spec.permission is Permission.READ_ONLY
 
 
@@ -443,3 +450,68 @@ def test_open_url_surfaces_browser_failures(services):
     assert result.success is False
     assert result.code == "service_error"
     assert "disabled in settings" in result.message
+
+
+def test_search_news_returns_recent_headlines_with_sources(services):
+    registry, *_ = services
+    feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel>
+      <item>
+        <title>Major event reported</title>
+        <link>https://news.google.com/articles/example</link>
+        <pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+        <source url="https://publisher.example">Example News</source>
+      </item>
+      <item>
+        <title>Unsafe link</title>
+        <link>javascript:alert(1)</link>
+        <pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+      </item>
+      <item>
+        <title>Stale headline</title>
+        <link>https://news.google.com/articles/stale</link>
+        <pubDate>Mon, 02 Nov 2025 10:00:00 GMT</pubDate>
+      </item>
+    </channel></rss>"""
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = feed
+
+    with patch("engine.app_tools.urllib.request.urlopen", return_value=response) as fetch:
+        result = registry.execute(
+            "search_news",
+            {"query": "latest events", "limit": 5},
+        )
+
+    assert result.success is True
+    assert result.data["count"] == 1
+    assert result.data["articles"][0] == {
+        "title": "Major event reported",
+        "source": "Example News",
+        "published_at": "2026-11-02T10:00:00+00:00",
+        "url": "https://news.google.com/articles/example",
+    }
+    assert fetch.call_args.kwargs["timeout"] == 10
+
+
+def test_search_news_validates_query_and_reports_feed_errors(services):
+    registry, *_ = services
+
+    empty = registry.execute("search_news", {"query": " "})
+    assert empty.success is False
+    assert empty.code == "validation_error"
+
+    invalid_limit = registry.execute(
+        "search_news", {"query": "news", "limit": 11}
+    )
+    assert invalid_limit.success is False
+    assert invalid_limit.code == "validation_error"
+
+    with patch(
+        "engine.app_tools.urllib.request.urlopen",
+        side_effect=TimeoutError("feed timeout"),
+    ):
+        failed = registry.execute("search_news", {"query": "news"})
+    assert failed.success is False
+    assert failed.code == "search_error"
+    assert "could not be fetched" in failed.message

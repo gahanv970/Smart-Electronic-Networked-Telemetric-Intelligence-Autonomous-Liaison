@@ -17,6 +17,7 @@
 - **Memory & Personalization Service**: Persistent context store and user preferences (name, communication tone, programming preferences). Injects relevant memories into Gemini prompts; automatically rejects sensitive credentials or secrets.
 - **Safe Windows & Browser Automation**: Controlled action allowlist for approved apps (Notepad, Calculator, File Explorer, Paint, Task Manager, Command Prompt), validated HTTP/HTTPS URL opening, private network blocking, path traversal protection, readable web page text extraction, and multi-step workflow orchestration. Consequential actions require explicit user confirmation.
 - **Chat Website Opening**: Ask S.E.N.T.I.A.L. to open a website such as YouTube; the requested URL is validated and requires confirmation before the default browser is launched.
+- **Live News Search**: Ask for current news or events to retrieve recent headlines from Google News RSS, with publisher, publication time, and source links.
 - **Google Gmail Integration**: Official Google Gmail API integration using OAuth 2.0 InstalledAppFlow, mailbox search, message detail viewing, draft sync, and strictly user-confirmed email dispatching.
 - **Secure Secret Storage**: API keys and OAuth tokens stored securely via the OS Keyring / Credential Manager with encrypted local fallbacks.
 
