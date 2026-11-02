@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Mapping, Optional
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
 from engine.tool_registry import Permission, ToolRegistrationError, ToolRegistry
 
@@ -51,6 +55,7 @@ APP_TOOL_NAMES = (
     "get_task",
     "list_tasks",
     "search_memories",
+    "search_news",
     "get_system_status",
     "open_url",
 )
@@ -258,6 +263,25 @@ _OPEN_URL_SCHEMA = {
         }
     },
     "required": ["url"],
+}
+
+_SEARCH_NEWS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": _MAX_SEARCH_LENGTH,
+            "description": "Topic, location, or event to find in current news.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Maximum number of recent headlines to return.",
+        },
+    },
+    "required": ["query"],
 }
 
 
@@ -611,6 +635,108 @@ def _make_open_url_handler(browser_service: Any):
     return open_url
 
 
+def _make_search_news_handler():
+    def search_news(query: str, limit: int = 5) -> Dict[str, Any]:
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            return _failure("validation_error", "News search query cannot be empty.")
+        if len(clean_query) > _MAX_SEARCH_LENGTH:
+            return _failure("validation_error", "News search query is too long.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
+            return _failure(
+                "validation_error",
+                "News result limit must be an integer between 1 and 10.",
+            )
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        feed_query = f"{clean_query} after:{cutoff.date().isoformat()}"
+        feed_url = (
+            "https://news.google.com/rss/search?"
+            + urllib.parse.urlencode(
+                {
+                    "q": feed_query,
+                    "hl": "en-US",
+                    "gl": "US",
+                    "ceid": "US:en",
+                }
+            )
+        )
+        request = urllib.request.Request(
+            feed_url,
+            headers={"User-Agent": "S.E.N.T.I.A.L./1.0 (news feed reader)"},
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = response.read(1_000_001)
+            if len(payload) > 1_000_000:
+                return _failure(
+                    "response_too_large",
+                    "The news feed response exceeded the size limit.",
+                )
+
+            root = ET.fromstring(payload)
+            articles = []
+            for item in root.findall(".//item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                source_element = item.find("source")
+                source = (
+                    (source_element.text or "").strip()
+                    if source_element is not None
+                    else ""
+                )
+                published = (item.findtext("pubDate") or "").strip()
+                if not title or not link:
+                    continue
+                if urllib.parse.urlparse(link).scheme.lower() != "https":
+                    continue
+                try:
+                    published_datetime = parsedate_to_datetime(published)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if published_datetime.tzinfo is None:
+                    published_datetime = published_datetime.replace(
+                        tzinfo=timezone.utc
+                    )
+                if published_datetime < cutoff:
+                    continue
+                articles.append(
+                    {
+                        "title": title[:500],
+                        "source": source[:200],
+                        "published_at": published_datetime.isoformat()[:100],
+                        "url": link[:2048],
+                    }
+                )
+            articles.sort(key=lambda article: article["published_at"], reverse=True)
+            articles = articles[:limit]
+
+            message = (
+                f"Found {len(articles)} current news result(s) for "
+                f"'{clean_query}'."
+                if articles
+                else f"No current news results were found for '{clean_query}'."
+            )
+            return _success(
+                message,
+                {
+                    "query": clean_query,
+                    "articles": articles,
+                    "count": len(articles),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - external feed boundary
+            logger.error("Tool 'search_news' failed with %s.", type(exc).__name__)
+            return _failure(
+                "search_error",
+                "The live news feed could not be fetched.",
+                error=_safe_error(exc),
+            )
+
+    return search_news
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -690,6 +816,21 @@ def register_app_tools(
         handler=_make_search_memories_handler(memory_service),
         permission=Permission.READ_ONLY,
         category="memory",
+        timeout_seconds=15.0,
+    )
+    registry.register(
+        name="search_news",
+        description=(
+            "Search Google News RSS for current headlines about a topic, place, "
+            "or event. Returns articles from the last seven days, newest first, "
+            "with titles, publishers, publication times, and source URLs. Use "
+            "for current events and news questions; base the answer on returned "
+            "results and cite their URLs. Read-only."
+        ),
+        parameters=_SEARCH_NEWS_SCHEMA,
+        handler=_make_search_news_handler(),
+        permission=Permission.READ_ONLY,
+        category="web",
         timeout_seconds=15.0,
     )
     registry.register(
