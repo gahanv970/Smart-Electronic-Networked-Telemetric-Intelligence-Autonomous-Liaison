@@ -99,6 +99,15 @@ class FakeAutomationService:
         return SimpleNamespace(success=True, message="ok", data={"os": "Windows"})
 
 
+class FakeBrowserService:
+    def navigate_url(self, url, user_confirmed=False):
+        return SimpleNamespace(
+            success=True,
+            message="Browser launch requested.",
+            data={"url": url, "launch_accepted": True},
+        )
+
+
 _DEFAULT_CLIENT = object()
 
 
@@ -220,6 +229,7 @@ def make_service(
         task_service=task_service,
         memory_service=FakeMemoryService(),
         automation_service=FakeAutomationService(),
+        browser_service=FakeBrowserService(),
         config=AgentConfig(
             max_tool_calls=4,
             tool_timeout_seconds=2.0,

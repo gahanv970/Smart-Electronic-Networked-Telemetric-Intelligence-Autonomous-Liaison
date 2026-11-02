@@ -8,12 +8,14 @@ is backed by an existing, verified application service:
 * :class:`~memory_service.MemoryService` — search saved memories.  This is only
   available while the user's memory setting is enabled.
 * :class:`~automation_service.WindowsAutomationService` — read system telemetry.
+* :class:`~browser_service.BrowserAutomationService` — open a validated URL
+  after explicit user confirmation.
 
 Deliberately **not** registered here:
 
 * arbitrary shell commands or Python execution;
 * unrestricted filesystem access;
-* browser automation (including ``extract_page_text``);
+* unrestricted browser automation (including ``extract_page_text``);
 * ``window_management`` (the existing implementation validates and reports an
   action but does not actually manipulate a window);
 * ``execute_workflow`` (it can report an overall result even when individual
@@ -50,6 +52,7 @@ APP_TOOL_NAMES = (
     "list_tasks",
     "search_memories",
     "get_system_status",
+    "open_url",
 )
 
 _VALID_PRIORITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -239,6 +242,22 @@ _SEARCH_MEMORIES_SCHEMA = {
 _SYSTEM_STATUS_SCHEMA = {
     "type": "object",
     "properties": {},
+}
+
+_OPEN_URL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": (
+                "HTTP or HTTPS URL to open. Resolve common site names such as "
+                "YouTube to their canonical website URL."
+            ),
+        }
+    },
+    "required": ["url"],
 }
 
 
@@ -547,6 +566,51 @@ def _make_system_status_handler(automation_service: Any):
     return get_system_status
 
 
+def _make_open_url_handler(browser_service: Any):
+    def open_url(url: str) -> Dict[str, Any]:
+        try:
+            clean_url = str(url or "").strip()
+            if not clean_url:
+                return _failure("validation_error", "URL cannot be empty.")
+            if len(clean_url) > 2048:
+                return _failure("validation_error", "URL is too long.")
+
+            result = browser_service.navigate_url(
+                clean_url,
+                user_confirmed=True,
+            )
+            if result is None:
+                return _failure(
+                    "service_error",
+                    "The browser service returned no result.",
+                )
+
+            success = getattr(result, "success", None)
+            message = str(getattr(result, "message", "") or "")
+            data = getattr(result, "data", None)
+            if (
+                success is not True
+                or not isinstance(data, Mapping)
+                or data.get("launch_accepted") is not True
+            ):
+                return _failure(
+                    "service_error",
+                    message or "The browser could not open the requested URL.",
+                    error=_safe_error(RuntimeError(message or "browser launch failed")),
+                )
+
+            return _success(message or "The URL was opened in the browser.", dict(data))
+        except Exception as exc:  # noqa: BLE001 - tool boundary
+            logger.error("Tool 'open_url' failed with %s.", type(exc).__name__)
+            return _failure(
+                "service_error",
+                "The browser service failed to open the URL.",
+                error=_safe_error(exc),
+            )
+
+    return open_url
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -558,6 +622,7 @@ def register_app_tools(
     task_service: Any,
     memory_service: Any,
     automation_service: Any,
+    browser_service: Any,
 ) -> ToolRegistry:
     """Register the reviewed application tools on ``registry``."""
     if not isinstance(registry, ToolRegistry):
@@ -573,6 +638,11 @@ def register_app_tools(
         automation_service,
         ("get_system_status",),
         "AutomationService",
+    )
+    _require_service(
+        browser_service,
+        ("navigate_url",),
+        "BrowserAutomationService",
     )
 
     registry.register(
@@ -634,6 +704,19 @@ def register_app_tools(
         category="system",
         timeout_seconds=15.0,
     )
+    registry.register(
+        name="open_url",
+        description=(
+            "Open a validated HTTP/HTTPS website in the user's default browser. "
+            "Use the canonical URL for common site names such as YouTube. "
+            "Always requires explicit user confirmation."
+        ),
+        parameters=_OPEN_URL_SCHEMA,
+        handler=_make_open_url_handler(browser_service),
+        permission=Permission.CONFIRMATION_REQUIRED,
+        category="browser",
+        timeout_seconds=30.0,
+    )
 
     return registry
 
@@ -643,6 +726,7 @@ def build_app_registry(
     task_service: Any,
     memory_service: Any,
     automation_service: Any,
+    browser_service: Any,
 ) -> ToolRegistry:
     """Build a fresh registry containing only the reviewed application tools."""
     registry = ToolRegistry("sential-app")
@@ -651,4 +735,5 @@ def build_app_registry(
         task_service=task_service,
         memory_service=memory_service,
         automation_service=automation_service,
+        browser_service=browser_service,
     )

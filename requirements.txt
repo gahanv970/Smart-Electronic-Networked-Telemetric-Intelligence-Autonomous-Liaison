@@ -10,4 +10,5 @@ google-auth-oauthlib>=1.2.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 winrt-Windows.UI.Notifications; sys_platform == 'win32'
+winrt-Windows.UI.Notifications.Management; sys_platform == 'win32'
 winrt-Windows.Foundation; sys_platform == 'win32'

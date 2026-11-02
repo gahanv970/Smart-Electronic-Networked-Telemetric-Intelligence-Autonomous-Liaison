@@ -11,6 +11,9 @@ from gemini_api import DEFAULT_MODEL, SUPPORTED_MODELS, GeminiAIProvider
 def test_provider_initialization():
     provider = GeminiAIProvider()
     assert provider.get_current_model() == DEFAULT_MODEL
+    assert DEFAULT_MODEL == "gemini-3.8-flash"
+    assert DEFAULT_MODEL in SUPPORTED_MODELS
+    assert "gemini-2.0-flash" not in SUPPORTED_MODELS
     assert not provider.is_configured()
     assert len(provider.get_available_models()) >= 4
 

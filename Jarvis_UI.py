@@ -124,6 +124,7 @@ class JarvisMainWindow(QMainWindow):
                 task_service=self.task_service,
                 memory_service=self.memory_service,
                 automation_service=self.automation_service,
+                browser_service=self.browser_service,
                 parent=self,
             )
             self.agent_service.event_received.connect(self._on_agent_event)

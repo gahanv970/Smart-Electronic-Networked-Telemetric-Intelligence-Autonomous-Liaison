@@ -121,6 +121,20 @@ class FakeAutomationService:
         return self.result
 
 
+class FakeBrowserService:
+    def __init__(self) -> None:
+        self.result = SimpleNamespace(
+            success=True,
+            message="Browser launch requested.",
+            data={"url": "https://www.youtube.com", "launch_accepted": True},
+        )
+        self.calls: List[Dict[str, Any]] = []
+
+    def navigate_url(self, url, user_confirmed=False):
+        self.calls.append({"url": url, "user_confirmed": user_confirmed})
+        return self.result
+
+
 @pytest.fixture
 def services():
     task = FakeTaskService(
@@ -169,16 +183,18 @@ def services():
         ]
     )
     automation = FakeAutomationService()
+    browser = FakeBrowserService()
     registry = build_app_registry(
         task_service=task,
         memory_service=memory,
         automation_service=automation,
+        browser_service=browser,
     )
-    return registry, task, memory, automation
+    return registry, task, memory, automation, browser
 
 
 def test_only_reviewed_tools_are_registered(services):
-    registry, _, _, _ = services
+    registry, _, _, _, _ = services
     assert isinstance(registry, ToolRegistry)
     assert set(registry.names()) == set(APP_TOOL_NAMES)
 
@@ -193,21 +209,21 @@ def test_only_reviewed_tools_are_registered(services):
         "delete_task",
         "delete_memory",
         "launch_app",
-        "open_url",
         "open_path",
     }
     assert forbidden.isdisjoint(set(registry.names()))
 
 
 def test_permissions_match_the_review(services):
-    registry, _, _, _ = services
+    registry, _, _, _, _ = services
     assert registry.get("create_task").spec.permission is Permission.CONFIRMATION_REQUIRED
+    assert registry.get("open_url").spec.permission is Permission.CONFIRMATION_REQUIRED
     for name in ("get_task", "list_tasks", "search_memories", "get_system_status"):
         assert registry.get(name).spec.permission is Permission.READ_ONLY
 
 
 def test_create_task_requires_confirmation_and_does_not_run_without_a_grant(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
 
     result = registry.execute("create_task", {"title": "Review Phase 3"})
 
@@ -217,7 +233,7 @@ def test_create_task_requires_confirmation_and_does_not_run_without_a_grant(serv
 
 
 def test_create_task_approved_grant_persists_and_reports_real_id(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
     broker = ConfirmationBroker(registry, lambda request: True)
 
     grant = broker.request("create_task", {"title": "Review Phase 3"})
@@ -237,7 +253,7 @@ def test_create_task_approved_grant_persists_and_reports_real_id(services):
 
 
 def test_create_task_denied_by_human_does_not_execute(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
     broker = ConfirmationBroker(registry, lambda request: False)
 
     grant = broker.request("create_task", {"title": "Review Phase 3"})
@@ -256,7 +272,7 @@ def test_create_task_denied_by_human_does_not_execute(services):
     ],
 )
 def test_create_task_invalid_arguments_are_rejected(services, arguments):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
     broker = ConfirmationBroker(registry, lambda request: True)
     try:
         grant = broker.request("create_task", arguments)
@@ -272,7 +288,7 @@ def test_create_task_invalid_arguments_are_rejected(services, arguments):
 
 
 def test_get_task_success_not_found_and_invalid_id(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
 
     found = registry.execute("get_task", {"task_id": 1})
     assert found.success is True
@@ -289,7 +305,7 @@ def test_get_task_success_not_found_and_invalid_id(services):
 
 
 def test_list_tasks_filters_and_limit(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
 
     result = registry.execute("list_tasks", {"limit": 2})
     assert result.success is True
@@ -316,7 +332,7 @@ def test_list_tasks_filters_and_limit(services):
 
 
 def test_memory_search_is_denied_without_reading_when_disabled(services):
-    registry, _, memory, _ = services
+    registry, _, memory, _, _ = services
 
     enabled = registry.execute("search_memories", {"query": "concise"})
     assert enabled.success is True
@@ -332,7 +348,7 @@ def test_memory_search_is_denied_without_reading_when_disabled(services):
 
 
 def test_system_status_success_and_failure(services):
-    registry, _, _, automation = services
+    registry, _, _, automation, _ = services
 
     success = registry.execute("get_system_status", {})
     assert success.success is True
@@ -357,7 +373,7 @@ def test_system_status_success_and_failure(services):
 
 
 def test_tool_exceptions_and_unknown_tools_fail_closed(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
 
     task.get_error = RuntimeError("database is locked; token=abc123secret")
     failed = registry.execute("get_task", {"task_id": 1})
@@ -372,7 +388,7 @@ def test_tool_exceptions_and_unknown_tools_fail_closed(services):
 
 
 def test_invalid_service_result_is_not_reported_as_success(services):
-    registry, task, _, _ = services
+    registry, task, _, _, _ = services
     task.create_task = lambda **kwargs: SimpleNamespace(no_mapping=True)
     broker = ConfirmationBroker(registry, lambda request: True)
     grant = broker.request("create_task", {"title": "Review"})
@@ -383,3 +399,47 @@ def test_invalid_service_result_is_not_reported_as_success(services):
 
     assert result.success is False
     assert result.code == "service_error"
+
+
+def test_open_url_requires_confirmation_and_uses_validated_browser_service(services):
+    registry, _, _, _, browser = services
+
+    denied = registry.execute("open_url", {"url": "https://www.youtube.com"})
+    assert denied.success is False
+    assert denied.code == "confirmation_required"
+    assert browser.calls == []
+
+    broker = ConfirmationBroker(registry, lambda request: True)
+    grant = broker.request("open_url", {"url": "https://www.youtube.com"})
+    result = registry.execute(
+        "open_url",
+        {"url": "https://www.youtube.com"},
+        confirmation=grant,
+    )
+
+    assert result.success is True
+    assert result.data["url"] == "https://www.youtube.com"
+    assert browser.calls == [
+        {"url": "https://www.youtube.com", "user_confirmed": True}
+    ]
+
+
+def test_open_url_surfaces_browser_failures(services):
+    registry, _, _, _, browser = services
+    browser.result = SimpleNamespace(
+        success=False,
+        message="Access Denied: Browser automation is disabled in settings.",
+        data={"launch_accepted": False},
+    )
+    broker = ConfirmationBroker(registry, lambda request: True)
+    grant = broker.request("open_url", {"url": "https://www.youtube.com"})
+
+    result = registry.execute(
+        "open_url",
+        {"url": "https://www.youtube.com"},
+        confirmation=grant,
+    )
+
+    assert result.success is False
+    assert result.code == "service_error"
+    assert "disabled in settings" in result.message
