@@ -95,9 +95,23 @@ class AudioPlayerSignals(QObject):
 #: Stable, documented ElevenLabs model that supports the standard TTS endpoint.
 #: Users can override it with ``elevenlabs_model_id`` in config.json or the
 #: ``ELEVENLABS_MODEL_ID`` environment variable.
-DEFAULT_ELEVENLABS_MODEL = "eleven_multilingual_v2"
+DEFAULT_ELEVENLABS_MODEL = "eleven_flash_v2_5"
+DEFAULT_ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 #: MP3 is accepted by QMediaPlayer on all supported Windows versions.
 DEFAULT_ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128"
+
+VOICE_VALIDATION_STATE_VALID = "VALID"
+VOICE_VALIDATION_STATE_INVALID = "INVALID"
+VOICE_VALIDATION_STATE_INACCESSIBLE = "INACCESSIBLE"
+VOICE_VALIDATION_STATE_NOT_YET_VALIDATED = "NOT_YET_VALIDATED"
+
+
+def _normalize_setting(value: object) -> str:
+    """Strip whitespace and quote wrappers from loaded settings."""
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return text
 
 
 def _redact_text(value: object, limit: int = 300) -> str:
@@ -164,6 +178,46 @@ def _describe_elevenlabs_error(exc: BaseException) -> str:
     return f"ElevenLabs request failed ({_redact_text(type(exc).__name__)})."
 
 
+def _collect_api_error_detail(exc: BaseException) -> str:
+    """Extract a sanitized API error detail from SDK exceptions."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        values = []
+        for key in ("detail", "message", "error", "title"):
+            if key in body:
+                values.append(str(body[key]))
+        for nested in ("errors", "details"):
+            if nested in body:
+                nested_value = body[nested]
+                if isinstance(nested_value, (list, tuple)):
+                    values.extend(str(item) for item in nested_value)
+                else:
+                    values.append(str(nested_value))
+        if values:
+            return _redact_text(" ".join(values), 400)
+    if isinstance(body, (list, tuple)):
+        joined = " ".join(str(item) for item in body)
+        if joined:
+            return _redact_text(joined, 400)
+    if isinstance(body, str) and body.strip():
+        return _redact_text(body, 400)
+    message = str(exc)
+    if message and message not in {"None", "headers: None, status_code: None, body: None"}:
+        return _redact_text(message, 400)
+    return ""
+
+
+def _describe_voice_validation_error(exc: BaseException) -> str:
+    """Return a sanitized validation failure description with the API detail."""
+    detail = _collect_api_error_detail(exc).strip()
+    base = _describe_elevenlabs_error(exc)
+    if detail:
+        if detail.startswith(base):
+            return detail
+        return f"{base} Details: {detail}"
+    return base
+
+
 def _create_elevenlabs_client(api_key: str, timeout_seconds: float):
     """Create the official SDK client lazily so importing the UI is cheap."""
     from elevenlabs.client import ElevenLabs
@@ -225,20 +279,26 @@ class ElevenLabsVoiceProvider(VoiceProvider):
         """Load credentials/configuration; this does not make a network call."""
         self._api_key = (get_secret("elevenlabs_api_key") or "").strip() or None
         self._voice_id = (
-            (get_secret("elevenlabs_voice_id") or "").strip() or None
-        ) or str(get_config_value("elevenlabs_voice_id", "") or "").strip() or None
+            _normalize_setting(get_secret("elevenlabs_voice_id"))
+            or _normalize_setting(get_config_value("elevenlabs_voice_id", DEFAULT_ELEVENLABS_VOICE_ID))
+            or DEFAULT_ELEVENLABS_VOICE_ID
+        )
         self._model_id = (
-            os.environ.get("ELEVENLABS_MODEL_ID")
-            or str(get_config_value("elevenlabs_model_id", DEFAULT_ELEVENLABS_MODEL))
-        ).strip()
+            _normalize_setting(os.environ.get("ELEVENLABS_MODEL_ID"))
+            or _normalize_setting(
+                get_config_value("elevenlabs_model_id", DEFAULT_ELEVENLABS_MODEL)
+            )
+            or DEFAULT_ELEVENLABS_MODEL
+        )
         self._output_format = (
-            os.environ.get("ELEVENLABS_OUTPUT_FORMAT")
-            or str(
+            _normalize_setting(os.environ.get("ELEVENLABS_OUTPUT_FORMAT"))
+            or _normalize_setting(
                 get_config_value(
                     "elevenlabs_output_format", DEFAULT_ELEVENLABS_OUTPUT_FORMAT
                 )
             )
-        ).strip()
+            or DEFAULT_ELEVENLABS_OUTPUT_FORMAT
+        )
         self._fallback_enabled = bool(
             get_config_value("voice_sapi_fallback", True)
         )
@@ -248,6 +308,8 @@ class ElevenLabsVoiceProvider(VoiceProvider):
             )
         except (TypeError, ValueError):
             self._timeout_seconds = 20.0
+
+        self._voice_validation_state = VOICE_VALIDATION_STATE_NOT_YET_VALIDATED
 
         if not self._api_key:
             self._available = False
@@ -275,17 +337,86 @@ class ElevenLabsVoiceProvider(VoiceProvider):
             )
         else:
             self._available = True
-            masked_id = (
-                self._voice_id[:6] + "..."
-                if len(self._voice_id) > 6
-                else self._voice_id
+            self._status = self._format_validation_status(
+                VOICE_VALIDATION_STATE_NOT_YET_VALIDATED
             )
-            # Credentials are configured, but only a real request can prove
-            # that the account can use this voice/model.
-            self._status = (
-                f"ElevenLabs configured (Voice ID: {masked_id}); "
-                "not yet validated by a request"
+
+    @property
+    def voice_validation_status(self) -> str:
+        with self._lock:
+            return self._voice_validation_state
+
+    def _masked_voice_id(self) -> str:
+        voice_id = self._voice_id or ""
+        if len(voice_id) <= 6:
+            return voice_id
+        return voice_id[:6] + "..."
+
+    def _format_validation_status(
+        self, state: str, detail: str = ""
+    ) -> str:
+        masked_id = self._masked_voice_id()
+        if state == VOICE_VALIDATION_STATE_VALID:
+            return f"ElevenLabs voice validation: VALID (Voice ID: {masked_id})."
+        if state == VOICE_VALIDATION_STATE_INVALID:
+            detail_text = detail.strip() or "The configured voice ID does not exist or was rejected."
+            return (
+                f"ElevenLabs voice validation: INVALID (Voice ID: {masked_id}) - "
+                f"{detail_text}"
             )
+        if state == VOICE_VALIDATION_STATE_INACCESSIBLE:
+            detail_text = detail.strip() or "This account cannot access the configured voice."
+            return (
+                f"ElevenLabs voice validation: INACCESSIBLE (Voice ID: {masked_id}) - "
+                f"{detail_text}"
+            )
+        return (
+            f"ElevenLabs configured (Voice ID: {masked_id}); "
+            "not yet validated by a request"
+        )
+
+    def _set_voice_validation_state(self, state: str, detail: str = "") -> None:
+        with self._lock:
+            self._voice_validation_state = state
+        self._set_status(self._format_validation_status(state, detail))
+
+    def _classify_voice_validation_error(self, exc: BaseException) -> str:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 403:
+            return VOICE_VALIDATION_STATE_INACCESSIBLE
+        return VOICE_VALIDATION_STATE_INVALID
+
+    def _validate_voice_id_with_client(self, client) -> str:
+        """Validate the configured voice against the authenticated ElevenLabs account."""
+        try:
+            client.voices.get(self._voice_id or "")
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            state = self._classify_voice_validation_error(exc)
+            message = _describe_voice_validation_error(exc)
+            self._set_voice_validation_state(state, message)
+            logger.warning("ElevenLabs voice validation failed: %s", message)
+            return state
+        self._set_voice_validation_state(
+            VOICE_VALIDATION_STATE_VALID,
+            "Voice verified against the authenticated ElevenLabs account.",
+        )
+        return VOICE_VALIDATION_STATE_VALID
+
+    def validate_voice_id(self) -> str:
+        """Query the authenticated ElevenLabs account and confirm the voice is usable."""
+        if not self._api_key or not self._voice_id or not self.is_available():
+            return self.voice_validation_status
+        try:
+            client = _create_elevenlabs_client(
+                self._api_key or "", self._timeout_seconds
+            )
+            return self._validate_voice_id_with_client(client)
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            state = self._classify_voice_validation_error(exc)
+            message = _describe_voice_validation_error(exc)
+            self._set_voice_validation_state(state, message)
+            logger.warning("ElevenLabs voice validation failed: %s", message)
+            return state
 
     def _next_generation(self) -> int:
         with self._lock:
@@ -328,24 +459,55 @@ class ElevenLabsVoiceProvider(VoiceProvider):
         def _worker() -> None:
             if not self._is_current(generation):
                 return
-            self._emit_status("ElevenLabs: generating audio...")
+            self._emit_status("ElevenLabs: validating voice...")
             try:
                 client = _create_elevenlabs_client(
                     self._api_key or "", self._timeout_seconds
                 )
+                validation_state = self._validate_voice_id_with_client(client)
+                if validation_state != VOICE_VALIDATION_STATE_VALID:
+                    if not self._is_current(generation):
+                        return
+                    reason = self.get_status()
+                    logger.warning(
+                        "Skipping ElevenLabs synthesis because the configured voice is not valid for this account: %s",
+                        reason,
+                    )
+                    self._fall_back(clean_text, generation, reason)
+                    return
+
                 from elevenlabs.types import VoiceSettings
 
-                audio = client.text_to_speech.convert(
-                    voice_id=self._voice_id or "",
-                    text=clean_text,
-                    model_id=self._model_id,
-                    output_format=self._output_format,
-                    voice_settings=VoiceSettings(
-                        stability=0.5,
-                        similarity_boost=0.75,
-                        use_speaker_boost=True,
-                    ),
-                )
+                model_id = self._model_id or DEFAULT_ELEVENLABS_MODEL
+                audio = None
+                for attempt in range(2):
+                    try:
+                        audio = client.text_to_speech.convert(
+                            voice_id=self._voice_id or "",
+                            text=clean_text,
+                            model_id=model_id,
+                            output_format=self._output_format,
+                            voice_settings=VoiceSettings(
+                                stability=0.5,
+                                similarity_boost=0.75,
+                                use_speaker_boost=True,
+                            ),
+                        )
+                        break
+                    except Exception as exc:  # noqa: BLE001 - provider boundary
+                        status_code = getattr(exc, "status_code", None)
+                        if (
+                            attempt == 0
+                            and status_code == 400
+                            and model_id != "eleven_multilingual_v2"
+                        ):
+                            logger.warning(
+                                "ElevenLabs model '%s' rejected the request (HTTP 400); retrying once with fallback model 'eleven_multilingual_v2'.",
+                                model_id,
+                            )
+                            model_id = "eleven_multilingual_v2"
+                            continue
+                        raise
                 if isinstance(audio, (bytes, bytearray)):
                     audio_bytes = bytes(audio)
                 else:
@@ -356,13 +518,24 @@ class ElevenLabsVoiceProvider(VoiceProvider):
                 if not self._is_current(generation):
                     return
                 reason = _describe_elevenlabs_error(exc)
-                logger.error("ElevenLabs TTS failed: %s", reason)
+                response = getattr(exc, "response", None)
+                response_text = getattr(response, "text", None)
+                if response_text is None and response is not None:
+                    response_text = getattr(response, "content", None)
+                if isinstance(response_text, (bytes, bytearray)):
+                    response_text = bytes(response_text).decode("utf-8", "replace")
+                logger.error(
+                    "ElevenLabs TTS failed: status_code=%s response_text=%s",
+                    getattr(exc, "status_code", None),
+                    _redact_text(str(response_text or "")),
+                )
                 self._emit_status(f"{reason} Falling back to Windows SAPI." if self._fallback_enabled else f"{reason} No fallback enabled.")
                 self._fall_back(clean_text, generation, reason)
                 return
 
             if not self._is_current(generation):
                 return
+            self._emit_status("ElevenLabs: generating audio...")
             if not audio_bytes:
                 reason = "ElevenLabs returned no audio data."
                 logger.error(reason)
@@ -645,6 +818,16 @@ class VoiceManager:
 
     def get_status(self) -> str:
         return self._provider.get_status()
+
+    def validate_voice_id(self) -> str:
+        validator = getattr(self._provider, "validate_voice_id", None)
+        if callable(validator):
+            return validator()
+        return getattr(self._provider, "voice_validation_status", "NOT_YET_VALIDATED")
+
+    @property
+    def voice_validation_status(self) -> str:
+        return getattr(self._provider, "voice_validation_status", "NOT_YET_VALIDATED")
 
     @property
     def last_engine(self) -> Optional[str]:

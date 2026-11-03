@@ -524,8 +524,12 @@ class JarvisMainWindow(QMainWindow):
         voice_layout.addWidget(QLabel("ElevenLabs Voice ID:"))
         self.elevenlabs_voice_id_input = QLineEdit()
         self.elevenlabs_voice_id_input.setPlaceholderText("Enter ElevenLabs Voice ID (e.g. 21m00Tcm4TlvDq8ikWAM)...")
-        existing_voice_id = get_secret("elevenlabs_voice_id") or get_config_value("elevenlabs_voice_id", "")
-        self.elevenlabs_voice_id_input.setText(existing_voice_id)
+        existing_voice_id = (
+            get_secret("elevenlabs_voice_id") or get_config_value("elevenlabs_voice_id", "")
+        )
+        self.elevenlabs_voice_id_input.setText(
+            str(existing_voice_id or "").strip().strip("\"'")
+        )
         voice_layout.addWidget(self.elevenlabs_voice_id_input)
 
         save_voice_settings_btn = QPushButton("Save Voice Configuration")
@@ -578,8 +582,8 @@ class JarvisMainWindow(QMainWindow):
         self.voice_status_lbl.setText(f"Voice Status: {self.voice_manager.get_status()}")
 
     def _save_elevenlabs_credentials(self):
-        key = self.elevenlabs_key_input.text().strip()
-        voice_id = self.elevenlabs_voice_id_input.text().strip()
+        key = self.elevenlabs_key_input.text().strip().strip("\"'")
+        voice_id = self.elevenlabs_voice_id_input.text().strip().strip("\"'")
 
         try:
             if key and key != MASKED_KEY:
