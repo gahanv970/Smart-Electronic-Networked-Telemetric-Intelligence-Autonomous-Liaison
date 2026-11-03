@@ -9,13 +9,15 @@
 - **Anime Cyberpunk Interface**: Original futuristic anime desktop interface with deep midnight background, glowing crimson/cyan/violet neon accents, custom navigation, and a Home Dashboard.
 - **Home Dashboard**: Polished dashboard featuring system status, live digital clock, Gemini AI and ElevenLabs connection indicators, quick action tiles, notification summaries, and recent activity logs.
 - **Animated S.E.N.T.I.A.L. Core**: Dynamic AI core visualization reflecting real-time AI states (*Idle*, *Thinking*, *Speaking*, *Error*).
-- **Google Gen AI SDK (`google-genai`)**: Centralized Gemini AI integration with model support (`gemini-2.0-flash`, `gemini-2.5-flash`, `gemini-2.5-pro`) and structured intent understanding with strict allowlist validation.
+- **Google Gen AI SDK (`google-genai`)**: Centralized Gemini AI integration with `gemini-3.8-flash` as the default model and structured intent understanding with strict allowlist validation.
 - **ElevenLabs & SAPI Voice**: Official ElevenLabs REST API text-to-speech voice clone provider with seamless fallback to native Windows SAPI.
 - **Notification Intelligence & Alert Center**: Centralized alert aggregation feed ranking WhatsApp Desktop and Gmail notifications by urgency (`CRITICAL`, `HIGH`, `NORMAL`, `LOW`) with priority contact locks against prompt injection.
 - **WhatsApp Personal Companion**: Smart contact intelligence, message analysis, urgency rating, AI reply drafting, and clipboard copying with optional Windows WinRT notification monitoring.
 - **Persistent Task Management**: Full SQLite-backed task tracking with CRUD operations, priority levels (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), due dates, status toggles, filtering, and real-time search.
 - **Memory & Personalization Service**: Persistent context store and user preferences (name, communication tone, programming preferences). Injects relevant memories into Gemini prompts; automatically rejects sensitive credentials or secrets.
 - **Safe Windows & Browser Automation**: Controlled action allowlist for approved apps (Notepad, Calculator, File Explorer, Paint, Task Manager, Command Prompt), validated HTTP/HTTPS URL opening, private network blocking, path traversal protection, readable web page text extraction, and multi-step workflow orchestration. Consequential actions require explicit user confirmation.
+- **Chat Website Opening**: Ask S.E.N.T.I.A.L. to open a website such as YouTube; the requested URL is validated and requires confirmation before the default browser is launched.
+- **Live News Search**: Ask for current news or events to retrieve recent headlines from Google News RSS, with publisher, publication time, and source links.
 - **Google Gmail Integration**: Official Google Gmail API integration using OAuth 2.0 InstalledAppFlow, mailbox search, message detail viewing, draft sync, and strictly user-confirmed email dispatching.
 - **Secure Secret Storage**: API keys and OAuth tokens stored securely via the OS Keyring / Credential Manager with encrypted local fallbacks.
 
@@ -81,7 +83,7 @@ S.E.N.T.I.A.L./
 
 1. **Gemini API Key**:
    - Open S.E.N.T.I.A.L. and click **Settings** (⚙️) on the sidebar.
-   - Enter your Gemini API key and select your preferred model (`gemini-3.6-flash`).
+   - Enter your Gemini API key and select your preferred model (`gemini-3.8-flash`).
    - Click **Save & Validate Credentials**. Your key will be securely saved into OS Keyring.
 
 2. **Gmail OAuth Integration**:
